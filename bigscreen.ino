@@ -136,8 +136,8 @@ int ansiState = 0;
 String ansiParams = "";
 
 void updateStatusBar(const String &text) {
-  tft.fillRect(0, 0, SCREEN_WIDTH, STATUS_BAR_HEIGHT, TFT_NAVY);
-  tft.setTextColor(TFT_WHITE, TFT_NAVY);
+  tft.fillRect(0, 0, SCREEN_WIDTH, STATUS_BAR_HEIGHT, TFT_MAGENTA);
+  tft.setTextColor(TFT_BLACK, TFT_MAGENTA);
   tft.setTextFont(1);
   tft.setTextSize(1);
   tft.setCursor(2, 4);
@@ -145,8 +145,8 @@ void updateStatusBar(const String &text) {
 }
 
 void termRedraw() {
-  tft.fillRect(0, STATUS_BAR_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT - STATUS_BAR_HEIGHT, TFT_BLACK);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.fillRect(0, STATUS_BAR_HEIGHT, SCREEN_WIDTH, TERM_ROWS * CHAR_H, TFT_BLACK);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextFont(1);
   tft.setTextSize(1);
   for (int r = 0; r < TERM_ROWS; r++) {
@@ -160,7 +160,7 @@ void termRedraw() {
 // Redraws just one row (used after a line-erase escape sequence)
 void termRedrawRow(int row) {
   tft.fillRect(0, STATUS_BAR_HEIGHT + row * CHAR_H, SCREEN_WIDTH, CHAR_H, TFT_BLACK);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextFont(1);
   tft.setTextSize(1);
   tft.setCursor(0, STATUS_BAR_HEIGHT + row * CHAR_H);
@@ -177,7 +177,7 @@ void termClearGrid() {
   }
   curRow = 0;
   curCol = 0;
-  tft.fillRect(0, STATUS_BAR_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT - STATUS_BAR_HEIGHT, TFT_BLACK);
+  tft.fillRect(0, STATUS_BAR_HEIGHT, SCREEN_WIDTH, TERM_ROWS * CHAR_H, TFT_BLACK);
 }
 
 void termAdvanceLine() {
@@ -268,10 +268,10 @@ void termHandleCSI(char cmd, const String &params) {
   }
 }
 
-// Draws one character of the telnet/SSH session (local keystrokes or remote
-// data) onto the screen, live, as it happens. Understands enough VT100/ANSI
-// escape sequences (cursor movement, erase line/display) to render real
-// interactive shell sessions reasonably instead of dumping raw escape bytes.
+// Draws one character of the telnet/SSH session onto the screen, live, as it
+// happens. Understands enough VT100/ANSI escape sequences (cursor movement,
+// erase line/display) to render real interactive shell sessions reasonably
+// instead of dumping raw escape bytes.
 void termPutChar(char c) {
   uint8_t uc = (uint8_t)c;
 
@@ -307,7 +307,7 @@ void termPutChar(char c) {
   if (uc < 32) return; // Swallow other unsupported control bytes
 
   termGrid[curRow][curCol] = c;
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextFont(1);
   tft.setTextSize(1);
   tft.setCursor(curCol * CHAR_W, STATUS_BAR_HEIGHT + curRow * CHAR_H);
@@ -315,24 +315,6 @@ void termPutChar(char c) {
 
   curCol++;
   if (curCol >= TERM_COLS) termAdvanceLine();
-}
-
-// Erases the last character on screen (used for local backspace/delete)
-void termBackspace() {
-  if (curCol > 0) {
-    curCol--;
-  } else if (curRow > 0) {
-    curRow--;
-    curCol = TERM_COLS - 1;
-  } else {
-    return; // Nothing to erase
-  }
-  termGrid[curRow][curCol] = ' ';
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.setTextFont(1);
-  tft.setTextSize(1);
-  tft.setCursor(curCol * CHAR_W, STATUS_BAR_HEIGHT + curRow * CHAR_H);
-  tft.print(' ');
 }
 
 void termPrintLine(const String &s) {
@@ -361,6 +343,52 @@ void resyncClientDisplay(WiFiClient &client, const String &headerMsg) {
     client.print(rowStr);
     client.print("\r\n");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Local input preview (ephemeral, never committed to the scrollback)
+// ---------------------------------------------------------------------------
+// Typing is drawn as an overlay exactly at the live cursor position (curRow,
+// curCol) - i.e. right at the prompt, wherever that currently is - in the
+// "writeback" magenta color. It never touches termGrid, so there is nothing
+// to de-duplicate: whatever the remote sends (an echo, a chat rebroadcast,
+// or anything else) is the only copy that ever becomes permanent history.
+// Before any remote data is processed the preview is cleared, and afterwards
+// it's redrawn at the (possibly moved) cursor position, so it always tracks
+// the live prompt even if background traffic arrives while you're typing.
+bool previewShown = false;
+int previewRow = -1;
+int previewCol = -1;
+int previewLen = 0;
+
+void clearPreview() {
+  if (!previewShown) return;
+  int width = min(previewLen * CHAR_W, SCREEN_WIDTH - previewCol * CHAR_W);
+  tft.fillRect(previewCol * CHAR_W, STATUS_BAR_HEIGHT + previewRow * CHAR_H, width, CHAR_H, TFT_BLACK);
+  previewShown = false;
+}
+
+void showPreview() {
+  clearPreview();
+  if (lineBuf.length() == 0) return;
+
+  int maxChars = TERM_COLS - curCol;
+  if (maxChars <= 0) return; // Cursor is past the edge of the screen - nothing to show
+  String toShow = lineBuf;
+  if ((int)toShow.length() > maxChars) {
+    toShow = toShow.substring(toShow.length() - maxChars); // Show the tail end
+  }
+
+  tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setCursor(curCol * CHAR_W, STATUS_BAR_HEIGHT + curRow * CHAR_H);
+  tft.print(toShow);
+
+  previewShown = true;
+  previewRow = curRow;
+  previewCol = curCol;
+  previewLen = toShow.length();
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +663,6 @@ void handleLocalLine(String line) {
 
   if (relayActive) {
     // Forward the typed line to the remote telnet server
-    // (the characters were already drawn to the screen live as they were typed)
     relayClient.print(line);
     relayClient.print("\r\n");
   } else if (sshActive) {
@@ -652,7 +679,7 @@ void setup() {
 
   // Start the TFT display
   tft.init();
-  tft.setRotation(1);
+  tft.setRotation(3); // Landscape, flipped 180 degrees from rotation 1
   tft.fillScreen(TFT_BLACK);
   updateStatusBar("Booting...");
   termClearGrid();
@@ -696,6 +723,7 @@ void loop() {
       // running here so you can disconnect, go do something else, and
       // reconnect later to pick the same session back up.
       lineBuf = "";
+      clearPreview();                        // Remove any stale in-progress typing left on screen
       localNeg = TelnetNegState();           // Reset telnet IAC negotiation state
       telnetClient = telnetServer.available();
 
@@ -732,9 +760,9 @@ void loop() {
       if (c == '\n') {
         telnetClient.print("\r\n");
         Serial.println();
-        termAdvanceLine(); // Move the screen cursor down, line was drawn live as typed
         String completedLine = lineBuf;
         lineBuf = "";
+        clearPreview(); // Cursor position is unchanged - the remote's own reply will land right here
         handleLocalLine(completedLine);
         continue;
       }
@@ -745,7 +773,7 @@ void loop() {
           telnetClient.write((uint8_t)8);
           telnetClient.write((uint8_t)' ');
           telnetClient.write((uint8_t)8);
-          termBackspace();
+          showPreview();
         }
         continue;
       }
@@ -754,9 +782,11 @@ void loop() {
       telnetClient.write(c);
       // Also mirror it to the physical Serial Monitor
       Serial.write(c);
-      // And draw it to the screen live, as it's typed
-      termPutChar(c);
+      // Draw it live, right at the prompt, as an ephemeral overlay (never
+      // committed to termGrid) - see showPreview() for why this avoids
+      // duplication entirely instead of trying to detect/suppress an echo.
       lineBuf += c;
+      showPreview();
     }
   }
 
@@ -765,6 +795,7 @@ void loop() {
     if (!relayClient.connected()) {
       stopRelay("Remote server closed the connection.");
     } else if (relayClient.available()) {
+      clearPreview(); // Let the remote draw on a clean slate at the cursor
       while (relayClient.available()) {
         char c = relayClient.read();
         if (telnetFilterByte(relayNeg, relayClient, (uint8_t)c)) {
@@ -774,6 +805,7 @@ void loop() {
         Serial.write(c);
         termPutChar(c);
       }
+      showPreview(); // Re-show any in-progress typing at the (possibly new) cursor position
     }
   }
 
@@ -784,16 +816,19 @@ void loop() {
     } else {
       int avail;
       char buf[256];
+      bool gotAny = false;
       while ((avail = ssh_channel_poll_timeout(sshChannel, 0, 0)) > 0) {
         int toRead = avail > (int)sizeof(buf) ? (int)sizeof(buf) : avail;
         int nread = ssh_channel_read_nonblocking(sshChannel, buf, toRead, 0);
         if (nread <= 0) break;
+        if (!gotAny) { clearPreview(); gotAny = true; } // Let the remote draw on a clean slate
         for (int i = 0; i < nread; i++) {
           if (telnetClient && telnetClient.connected()) telnetClient.write((uint8_t)buf[i]);
           Serial.write((uint8_t)buf[i]);
           termPutChar(buf[i]);
         }
       }
+      if (gotAny) showPreview(); // Re-show any in-progress typing at the (possibly new) cursor position
       if (avail < 0) {
         stopSSH("SSH session ended.");
       }
